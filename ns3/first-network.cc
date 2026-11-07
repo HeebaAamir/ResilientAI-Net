@@ -8,6 +8,28 @@
 using namespace ns3;
 NS_LOG_COMPONENT_DEFINE("FirstNetwork");
 
+
+void FailLink(NodeContainer nodes, NetDeviceContainer link)
+{
+    Ptr<Ipv4> ipv4Node0 = nodes.Get(0)->GetObject<Ipv4>();
+    Ptr<Ipv4> ipv4Node1 = nodes.Get(1)->GetObject<Ipv4>();
+
+    uint32_t interface0 =
+        ipv4Node0->GetInterfaceForDevice(link.Get(0));
+
+    uint32_t interface1 =
+        ipv4Node1->GetInterfaceForDevice(link.Get(1));
+
+    ipv4Node0->SetDown(interface0);
+    ipv4Node1->SetDown(interface1);
+
+    Ipv4GlobalRoutingHelper::RecomputeRoutingTables();
+
+    std::cout << "\nLINK FAILURE: Node 0 - Node 1 at "
+              << Simulator::Now().GetSeconds() << " seconds\n";
+}
+
+
 int main()
 {
     LogComponentEnable("UdpEchoServerApplication", LOG_LEVEL_INFO);
@@ -46,8 +68,18 @@ LogComponentEnable("UdpEchoClientApplication", LOG_LEVEL_INFO);
     address.SetBase("10.1.4.0", "255.255.255.0");
     Ipv4InterfaceContainer i23 = address.Assign(d23);
 
-    // 6. Calculate routing tables
-    Ipv4GlobalRoutingHelper::PopulateRoutingTables();
+    // 6. // Make Path B less preferable so traffic initially uses Path A
+Ptr<Ipv4> ipv4Node0 = nodes.Get(0)->GetObject<Ipv4>();
+Ptr<Ipv4> ipv4Node2 = nodes.Get(2)->GetObject<Ipv4>();
+
+uint32_t interface02 = ipv4Node0->GetInterfaceForDevice(d02.Get(0));
+uint32_t interface23 = ipv4Node2->GetInterfaceForDevice(d23.Get(0));
+
+ipv4Node0->SetMetric(interface02, 10);
+ipv4Node2->SetMetric(interface23, 10);
+
+// Calculate routing tables
+Ipv4GlobalRoutingHelper::PopulateRoutingTables();
 
 
     // 7. Install UDP Echo Server on Node 3
@@ -70,6 +102,7 @@ LogComponentEnable("UdpEchoClientApplication", LOG_LEVEL_INFO);
     clientApp.Stop(Seconds(12.0));
 
     // 9. Run simulation
+    Simulator::Schedule(Seconds(5.0), &FailLink, nodes, d01);
     Simulator::Stop(Seconds(13.0));
 
     std::cout << "Starting 4-node diamond network simulation..."
