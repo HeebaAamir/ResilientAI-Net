@@ -5,6 +5,7 @@
 #include "ns3/applications-module.h"
 #include "ns3/ipv4-global-routing-helper.h"
 #include "ns3/flow-monitor-module.h"
+#include <fstream>
 
 using namespace std;
 using namespace ns3;
@@ -34,8 +35,10 @@ void FailLink(NodeContainer nodes, NetDeviceContainer link)
 
 int main()
 {
+    ofstream dataset("network_dataset.csv");
+    dataset << "time,flowId,txPackets,rxPackets,lostPackets\n";
     LogComponentEnable("UdpEchoServerApplication", LOG_LEVEL_INFO);
-LogComponentEnable("UdpEchoClientApplication", LOG_LEVEL_INFO);
+    LogComponentEnable("UdpEchoClientApplication", LOG_LEVEL_INFO);
     // 1. Create four nodes
     NodeContainer nodes;
     nodes.Create(4);
@@ -114,6 +117,19 @@ Ipv4GlobalRoutingHelper::PopulateRoutingTables();
 
     Simulator::Run();
     monitor->CheckForLostPackets();
+    auto flowStats = monitor->GetFlowStats();
+
+    for (const auto &flow : flowStats)
+    {
+    dataset << Simulator::Now().GetSeconds() << ","
+            << flow.first << ","
+            << flow.second.txPackets << ","
+            << flow.second.rxPackets << ","
+            << flow.second.lostPackets << "\n";
+}
+
+    
+dataset.close();
     monitor->SerializeToXmlFile(
     "first-network-flowmon.xml",
     true,
