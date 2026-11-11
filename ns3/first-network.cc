@@ -4,7 +4,9 @@
 #include "ns3/point-to-point-module.h"
 #include "ns3/applications-module.h"
 #include "ns3/ipv4-global-routing-helper.h"
+#include "ns3/flow-monitor-module.h"
 
+using namespace std;
 using namespace ns3;
 NS_LOG_COMPONENT_DEFINE("FirstNetwork");
 
@@ -25,7 +27,7 @@ void FailLink(NodeContainer nodes, NetDeviceContainer link)
 
     Ipv4GlobalRoutingHelper::RecomputeRoutingTables();
 
-    std::cout << "\nLINK FAILURE: Node 0 - Node 1 at "
+    cout << "\nLINK FAILURE: Node 0 - Node 1 at "
               << Simulator::Now().GetSeconds() << " seconds\n";
 }
 
@@ -103,16 +105,24 @@ Ipv4GlobalRoutingHelper::PopulateRoutingTables();
 
     // 9. Run simulation
     Simulator::Schedule(Seconds(5.0), &FailLink, nodes, d01);
+    FlowMonitorHelper flowmon;
+    Ptr<FlowMonitor> monitor = flowmon.InstallAll();
     Simulator::Stop(Seconds(13.0));
 
-    std::cout << "Starting 4-node diamond network simulation..."
-              << std::endl;
+    cout << "Starting 4-node diamond network simulation..."
+              << endl;
 
     Simulator::Run();
+    monitor->CheckForLostPackets();
+    monitor->SerializeToXmlFile(
+    "first-network-flowmon.xml",
+    true,
+    true
+);
     Simulator::Destroy();
 
-    std::cout << "Simulation completed successfully!"
-              << std::endl;
+    cout << "Simulation completed successfully!"
+              << endl;
 
     return 0;
 }
