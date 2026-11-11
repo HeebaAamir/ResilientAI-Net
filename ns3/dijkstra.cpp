@@ -112,6 +112,10 @@ int main()
         {0, 1, 10, 0}
     };
 
+    // Simulate failure of the link between Node 0 and Node 1
+    graph[0][1] = 0;
+    graph[1][0] = 0;
+
     // Find the shortest paths starting from Node 0
     dijkstra(graph, 0);
 
