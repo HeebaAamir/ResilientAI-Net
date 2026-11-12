@@ -5,10 +5,12 @@
 #include "ns3/applications-module.h"
 #include "ns3/ipv4-global-routing-helper.h"
 #include "ns3/flow-monitor-module.h"
+#include "ns3/ipv4-static-routing-helper.h"
 #include <fstream>
 #include <vector>
 #include <memory>
 #include <climits>
+#include <algorithm>
 
 using namespace std;
 using namespace ns3;
@@ -20,7 +22,7 @@ void AddEdge(vector<vector<int>>& graph, int u, int v, int weight)
     graph[v][u] = weight;
 }
 
-void dijkstra(vector<vector<int>> graph, int src)
+vector <int> dijkstra(vector<vector<int>> graph, int src)
 {
     int V = graph.size();
 
@@ -89,7 +91,8 @@ void dijkstra(vector<vector<int>> graph, int src)
     // prevents program to take a path that doesn't exist
     if (dist[V - 1] == INT_MAX){
     cout << "Destination is unreachable" << endl;
-    return;
+    // returning an empty array/vector if node is unreachable
+    return{};
     }
     // Print the shortest distance to the destination 
     cout << "Shortest distance: " << dist[V - 1] << endl;
@@ -103,6 +106,9 @@ void dijkstra(vector<vector<int>> graph, int src)
     {
         path.push_back(node);
     }
+
+    reverse(path.begin(), path.end());
+    return path;
 
     // Print the path in the correct direction
     cout << "Shortest path: ";
@@ -118,7 +124,7 @@ void dijkstra(vector<vector<int>> graph, int src)
     cout << endl;
 }
 
-void FailLink(NodeContainer nodes, NetDeviceContainer link, shared_ptr<vector<vector<int>>> graph)
+void FailLink(NodeContainer nodes, NetDeviceContainer link, NetDeviceContainer d02, Ipv4InterfaceContainer i02, shared_ptr<vector<vector<int>>> graph)
 {
     Ptr<Ipv4> ipv4Node0 = nodes.Get(0)->GetObject<Ipv4>();
     Ptr<Ipv4> ipv4Node1 = nodes.Get(1)->GetObject<Ipv4>();
@@ -137,7 +143,44 @@ void FailLink(NodeContainer nodes, NetDeviceContainer link, shared_ptr<vector<ve
     // Remove the failed link from our Dijkstra graph
     (*graph)[0][1] = 0;
     (*graph)[1][0] = 0;
-    dijkstra(*graph, 0);
+    vector <int> path = dijkstra(*graph, 0);
+    int nextHop = path[1];
+
+    // Access Node 0's static routing table
+Ipv4StaticRoutingHelper routingHelper;
+Ptr<Ipv4StaticRouting> static0 =
+    routingHelper.GetStaticRouting(ipv4Node0);
+
+// Remove the old route to Node 3
+Ipv4Address destination("10.1.2.2");
+
+for (uint32_t i = static0->GetNRoutes(); i > 0; )
+{
+    --i;
+    Ipv4RoutingTableEntry route = static0->GetRoute(i);
+
+    if (route.IsHost() && route.GetDest() == destination)
+    {
+        static0->RemoveRoute(i);
+        break;
+    }
+}
+
+// Install the route selected by Dijkstra
+if (nextHop == 2)
+{
+    uint32_t newInterface =
+        ipv4Node0->GetInterfaceForDevice(d02.Get(0));
+
+    static0->AddHostRouteTo(
+        destination,
+        i02.GetAddress(1),
+        newInterface
+    );
+
+    cout << "Dijkstra routing updated: Node 0 -> Node 2 -> Node 3"
+         << endl;
+}
 
     Ipv4GlobalRoutingHelper::RecomputeRoutingTables();
 
@@ -192,7 +235,7 @@ int main()
     address.SetBase("10.1.4.0", "255.255.255.0");
     Ipv4InterfaceContainer i23 = address.Assign(d23);
 
-    // 6. // Make Path B less preferable so traffic initially uses Path A
+    // 6. Make Path B less preferable so traffic initially uses Path A
 Ptr<Ipv4> ipv4Node0 = nodes.Get(0)->GetObject<Ipv4>();
 Ptr<Ipv4> ipv4Node2 = nodes.Get(2)->GetObject<Ipv4>();
 
@@ -204,6 +247,35 @@ ipv4Node2->SetMetric(interface23, 10);
 
 // Calculate routing tables
 Ipv4GlobalRoutingHelper::PopulateRoutingTables();
+
+Ipv4StaticRoutingHelper routingHelper;
+
+Ptr<Ipv4StaticRouting> static0 =
+    routingHelper.GetStaticRouting(nodes.Get(0)->GetObject<Ipv4>());
+
+Ptr<Ipv4StaticRouting> static2 =
+    routingHelper.GetStaticRouting(nodes.Get(2)->GetObject<Ipv4>());
+
+Ptr<Ipv4StaticRouting> static3 =
+    routingHelper.GetStaticRouting(nodes.Get(3)->GetObject<Ipv4>());
+
+// Get interface indices
+uint32_t if01 = nodes.Get(0)->GetObject<Ipv4>()->GetInterfaceForDevice(d01.Get(0));
+uint32_t if13 = nodes.Get(3)->GetObject<Ipv4>()->GetInterfaceForDevice(d13.Get(1));
+uint32_t if23Node2 = nodes.Get(2)->GetObject<Ipv4>()->GetInterfaceForDevice(d23.Get(0));
+uint32_t if23Node3 = nodes.Get(3)->GetObject<Ipv4>()->GetInterfaceForDevice(d23.Get(1));
+
+// Node 0 -> Node 3, initially through Node 1
+static0->AddHostRouteTo(i13.GetAddress(1), i01.GetAddress(1), if01);
+
+// Node 3 -> Node 0, return through Node 1
+static3->AddHostRouteTo(i01.GetAddress(0), i13.GetAddress(0), if13);
+
+// Node 2 -> Node 3, needed for the alternate path
+static2->AddHostRouteTo(i13.GetAddress(1), i23.GetAddress(1), if23Node2);
+
+// Node 3 -> Node 0's alternate address, through Node 2
+static3->AddHostRouteTo(i02.GetAddress(0), i23.GetAddress(0), if23Node3);
 
 
     // 7. Install UDP Echo Server on Node 3
@@ -226,7 +298,7 @@ Ipv4GlobalRoutingHelper::PopulateRoutingTables();
     clientApp.Stop(Seconds(12.0));
 
     // 9. Run simulation
-    Simulator::Schedule(Seconds(5.0), &FailLink, nodes, d01, graph);
+    Simulator::Schedule(Seconds(5.0), &FailLink, nodes, d01, d02, i02, graph);
     FlowMonitorHelper flowmon;
     Ptr<FlowMonitor> monitor = flowmon.InstallAll();
     Simulator::Stop(Seconds(13.0));
