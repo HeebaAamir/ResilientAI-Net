@@ -188,8 +188,14 @@ if (nextHop == 2)
 }
 
 
-int main()
+int main(int argc, char *argv[])
 {
+    //setting a default value for time after which failure will occur
+    double failureTime = 5.0;
+    // introducing cmd arguments to change time to showcase real time dynamic failures
+    CommandLine cmd;
+    cmd.AddValue("failureTime", "Time at which the link fails", failureTime);
+    cmd.Parse(argc, argv);
     auto graph = make_shared<vector<vector<int>>>(4, vector<int>(4, 0));
 
     AddEdge(*graph, 0, 1, 1);
@@ -197,9 +203,14 @@ int main()
     AddEdge(*graph, 0, 2, 10);
     AddEdge(*graph, 2, 3, 10);
 
-    ofstream dataset("network_dataset.csv");
-    dataset << "time,flowId,txPackets,rxPackets,lostPackets,"
-           "pdr,avgDelayMs,throughputMbps\n";
+
+    bool fileExists = ifstream("network_dataset.csv").good();
+    ofstream dataset("network_dataset.csv", ios::app);
+    if(!fileExists){
+        dataset << "simulationEndTime,failureTime,flowId,txPackets,rxPackets,lostPackets,"
+               "pdr,avgDelayMs,throughputMbps\n";
+    }
+
     LogComponentEnable("UdpEchoServerApplication", LOG_LEVEL_INFO);
     LogComponentEnable("UdpEchoClientApplication", LOG_LEVEL_INFO);
     // 1. Create four nodes
@@ -299,7 +310,7 @@ static3->AddHostRouteTo(i02.GetAddress(0), i23.GetAddress(0), if23Node3);
     clientApp.Stop(Seconds(12.0));
 
     // 9. Run simulation
-    Simulator::Schedule(Seconds(5.0), &FailLink, nodes, d01, d02, i02, graph);
+    Simulator::Schedule(Seconds(failureTime), &FailLink, nodes, d01, d02, i02, graph);
     FlowMonitorHelper flowmon;
     Ptr<FlowMonitor> monitor = flowmon.InstallAll();
     Simulator::Stop(Seconds(13.0));
@@ -310,10 +321,24 @@ static3->AddHostRouteTo(i02.GetAddress(0), i23.GetAddress(0), if23Node3);
     Simulator::Run();
     monitor->CheckForLostPackets();
     auto flowStats = monitor->GetFlowStats();
+    Ptr<Ipv4FlowClassifier> classifier =
+    DynamicCast<Ipv4FlowClassifier>(flowmon.GetClassifier());
 
     for (const auto &flow : flowStats)
 {
     auto stats = flow.second;
+
+    auto tuple = classifier->FindFlow(flow.first);
+    if (tuple.destinationPort != 9){
+    continue;
+    }  
+
+    cout << "Flow " << flow.first << ": "
+     << tuple.sourceAddress << " -> "
+     << tuple.destinationAddress
+     << " | Source port: " << tuple.sourcePort
+     << " | Destination port: " << tuple.destinationPort
+     << endl;
 
     double pdr = 0.0;
     double avgDelayMs = 0.0;
@@ -340,6 +365,7 @@ static3->AddHostRouteTo(i02.GetAddress(0), i23.GetAddress(0), if23Node3);
     }
 
     dataset << Simulator::Now().GetSeconds() << ","
+            << failureTime << ","
             << flow.first << ","
             << stats.txPackets << ","
             << stats.rxPackets << ","
