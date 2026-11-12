@@ -67,6 +67,13 @@ void dijkstra(vector<vector<int>> graph, int src)
         }
 
     }
+
+    // Check to see if the destination is unreachable
+    // prevents program to take a path that doesn't exist
+    if (dist[V - 1] == INT_MAX){
+    cout << "Destination is unreachable" << endl;
+    return;
+    }
     // Print the shortest distance to the destination 
     cout << "Shortest distance: " << dist[V - 1] << endl;
 
@@ -112,9 +119,11 @@ int main()
         {0, 1, 10, 0}
     };
 
-    // Simulate failure of the link between Node 0 and Node 1
+    // Simulate failure of the link between Node 0 and Node 1 and Node 2 such that no path exists to node 3
     graph[0][1] = 0;
     graph[1][0] = 0;
+    graph[0][2] = 0;
+    graph[2][0] = 0;
 
     // Find the shortest paths starting from Node 0
     dijkstra(graph, 0);
