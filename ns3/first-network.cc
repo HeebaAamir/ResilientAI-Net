@@ -198,7 +198,8 @@ int main()
     AddEdge(*graph, 2, 3, 10);
 
     ofstream dataset("network_dataset.csv");
-    dataset << "time,flowId,txPackets,rxPackets,lostPackets\n";
+    dataset << "time,flowId,txPackets,rxPackets,lostPackets,"
+           "pdr,avgDelayMs,throughputMbps\n";
     LogComponentEnable("UdpEchoServerApplication", LOG_LEVEL_INFO);
     LogComponentEnable("UdpEchoClientApplication", LOG_LEVEL_INFO);
     // 1. Create four nodes
@@ -311,12 +312,41 @@ static3->AddHostRouteTo(i02.GetAddress(0), i23.GetAddress(0), if23Node3);
     auto flowStats = monitor->GetFlowStats();
 
     for (const auto &flow : flowStats)
+{
+    auto stats = flow.second;
+
+    double pdr = 0.0;
+    double avgDelayMs = 0.0;
+    double throughputMbps = 0.0;
+
+    if (stats.txPackets > 0)
     {
+        pdr = (double)stats.rxPackets / stats.txPackets * 100.0;
+    }
+
+    if (stats.rxPackets > 0)
+    {
+        avgDelayMs =
+            stats.delaySum.GetSeconds() / stats.rxPackets * 1000.0;
+
+        double duration =
+            (stats.timeLastRxPacket - stats.timeFirstTxPacket).GetSeconds();
+
+        if (duration > 0)
+        {
+            throughputMbps =
+                (stats.rxBytes * 8.0) / duration / 1000000.0;
+        }
+    }
+
     dataset << Simulator::Now().GetSeconds() << ","
             << flow.first << ","
-            << flow.second.txPackets << ","
-            << flow.second.rxPackets << ","
-            << flow.second.lostPackets << "\n";
+            << stats.txPackets << ","
+            << stats.rxPackets << ","
+            << stats.lostPackets << ","
+            << pdr << ","
+            << avgDelayMs << ","
+            << throughputMbps << "\n";
 }
 
     
