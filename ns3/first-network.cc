@@ -11,6 +11,7 @@
 #include <memory>
 #include <climits>
 #include <algorithm>
+#include <map>
 
 using namespace std;
 using namespace ns3;
@@ -187,6 +188,82 @@ if (nextHop == 2)
     
 }
 
+void CollectMetrics(Ptr<FlowMonitor> monitor,Ptr<Ipv4FlowClassifier> classifier, double failureTime){
+    auto flowStats = monitor->GetFlowStats();
+    static map<FlowId, FlowMonitor::FlowStats> previousStats;
+
+    for (const auto &flow : flowStats){
+    auto stats = flow.second;
+    auto tuple = classifier->FindFlow(flow.first);
+
+    if (tuple.destinationPort != 9){
+        continue;
+    }
+    auto previous = previousStats[flow.first];
+
+    uint64_t txPackets = stats.txPackets - previous.txPackets;
+    uint64_t rxPackets = stats.rxPackets - previous.rxPackets;
+    uint64_t rxBytes = stats.rxBytes - previous.rxBytes;
+    Time delay = stats.delaySum - previous.delaySum;
+
+    double pdr = txPackets > 0 ? (double)rxPackets / txPackets * 100.0 : 0.0;
+
+    double avgDelayMs = rxPackets > 0 ? delay.GetSeconds() / rxPackets * 1000.0 : 0.0;
+
+    double throughputMbps = rxBytes * 8.0 / 1000000.0;
+
+    double sampleTime = Simulator::Now().GetSeconds();
+
+    int futureFailure =(failureTime > sampleTime && failureTime <= sampleTime + 2.0) ? 1 : 0;
+
+    bool fileExists =
+    ifstream("time_window_dataset.csv").good();
+
+    ofstream dataset("time_window_dataset.csv", ios::app);
+
+    if (!fileExists){
+    dataset << "sampleTime,txPackets,rxPackets,rxBytes,"
+            << "pdr,avgDelayMs,throughputMbps,futureFailure,failureTime\n";
+}
+
+dataset << sampleTime << ","
+        << txPackets << ","
+        << rxPackets << ","
+        << rxBytes << ","
+        << pdr << ","
+        << avgDelayMs << ","
+        << throughputMbps << ","
+        << futureFailure << ","
+        << failureTime << "\n";
+
+    previousStats[flow.first] = stats;
+
+    }
+    if (Simulator::Now().GetSeconds() < 12.0){
+    Simulator::Schedule(
+        Seconds(1.0),
+        &CollectMetrics,
+        monitor,
+        classifier,
+        failureTime
+    );
+}
+}
+
+void ChangeLinkDelay(NetDeviceContainer link, Time newDelay)
+{
+    Ptr<PointToPointChannel> channel =
+        DynamicCast<PointToPointChannel>(
+            link.Get(0)->GetChannel()
+        );
+
+    channel->SetAttribute("Delay", TimeValue(newDelay));
+
+    cout << "Link delay changed to "
+         << newDelay.GetMilliSeconds() << " ms at "
+         << Simulator::Now().GetSeconds() << " seconds"
+         << endl;
+}
 
 int main(int argc, char *argv[])
 {
@@ -222,11 +299,17 @@ int main(int argc, char *argv[])
     p2p.SetDeviceAttribute("DataRate", StringValue("5Mbps"));
     p2p.SetChannelAttribute("Delay", StringValue("2ms"));
 
-    // 3. Connect the nodes in a diamond topology
-    NetDeviceContainer d01 = p2p.Install(nodes.Get(0), nodes.Get(1));
+    // 3. p2p helper pointer installs nodes 13,02 and 23
     NetDeviceContainer d13 = p2p.Install(nodes.Get(1), nodes.Get(3));
     NetDeviceContainer d02 = p2p.Install(nodes.Get(0), nodes.Get(2));
     NetDeviceContainer d23 = p2p.Install(nodes.Get(2), nodes.Get(3));
+
+    PointToPointHelper p2p01;
+    p2p01.SetDeviceAttribute("DataRate", StringValue("5Mbps"));
+    p2p01.SetChannelAttribute("Delay", StringValue("2ms"));
+
+    // p2p01 helper pointer installs 01 node
+    NetDeviceContainer d01 = p2p01.Install(nodes.Get(0), nodes.Get(1));
 
     // 4. Install the Internet stack
     InternetStackHelper internet;
@@ -310,19 +393,37 @@ static3->AddHostRouteTo(i02.GetAddress(0), i23.GetAddress(0), if23Node3);
     clientApp.Stop(Seconds(12.0));
 
     // 9. Run simulation
-    Simulator::Schedule(Seconds(failureTime), &FailLink, nodes, d01, d02, i02, graph);
     FlowMonitorHelper flowmon;
     Ptr<FlowMonitor> monitor = flowmon.InstallAll();
+
+    Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowmon.GetClassifier());
+
+    // Gradually degrade the Node 0 - Node 1 link
+    Simulator::Schedule(Seconds(4.0), &ChangeLinkDelay, d01, MilliSeconds(5));
+
+    Simulator::Schedule( Seconds(5.0), &ChangeLinkDelay, d01, MilliSeconds(10));
+
+    Simulator::Schedule(Seconds(6.0), &ChangeLinkDelay, d01, MilliSeconds(20));
+
+// Schedule the actual link failure
+Simulator::Schedule(Seconds(failureTime),&FailLink, nodes, d01, d02, i02, graph
+);
+// Start collecting metrics at 2 seconds
+    Simulator::Schedule(
+    Seconds(2.0),
+    &CollectMetrics,
+    monitor,
+    classifier,
+    failureTime
+);
+
     Simulator::Stop(Seconds(13.0));
 
-    cout << "Starting 4-node diamond network simulation..."
-              << endl;
+    cout << "Starting 4-node diamond network simulation..." << endl;
 
     Simulator::Run();
     monitor->CheckForLostPackets();
     auto flowStats = monitor->GetFlowStats();
-    Ptr<Ipv4FlowClassifier> classifier =
-    DynamicCast<Ipv4FlowClassifier>(flowmon.GetClassifier());
 
     for (const auto &flow : flowStats)
 {
