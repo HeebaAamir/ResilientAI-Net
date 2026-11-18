@@ -17,13 +17,30 @@ using namespace std;
 using namespace ns3;
 NS_LOG_COMPONENT_DEFINE("FirstNetwork");
 
+// Stores all the information associated with a network link
+struct LinkInfo
+{
+    // Identifies the two nodes connected by this link
+    uint32_t nodeA;
+    uint32_t nodeB;
+
+    // Stores the network devices installed at both endpoints
+    NetDeviceContainer devices;
+
+    // Stores the IP interfaces assigned to both endpoints
+    Ipv4InterfaceContainer interfaces;
+
+    // Cost of using this link during shortest-path calculation
+    int weight; 
+};
+
 void AddEdge(vector<vector<int>>& graph, int u, int v, int weight)
 {
     graph[u][v] = weight;
     graph[v][u] = weight;
 }
 
-vector <int> dijkstra(vector<vector<int>> graph, int src)
+vector <int> dijkstra(vector<vector<int>> graph, int src, int destination)
 {
     int V = graph.size();
 
@@ -90,20 +107,20 @@ vector <int> dijkstra(vector<vector<int>> graph, int src)
 
     // Check to see if the destination is unreachable
     // prevents program to take a path that doesn't exist
-    if (dist[V - 1] == INT_MAX){
+    if (dist[destination] == INT_MAX){
     cout << "Destination is unreachable" << endl;
     // returning an empty array/vector if node is unreachable
     return{};
     }
     // Print the shortest distance to the destination 
-    cout << "Shortest distance: " << dist[V - 1] << endl;
+    cout << "Shortest distance: " << dist[destination] << endl;
 
 
     // Store the shortest path
     vector<int> path;
 
     // Follow parent pointers backwards, starting from destination
-    for (int node = V - 1; node != -1; node = parent[node])
+    for (int node = destination; node != -1; node = parent[node])
     {
         path.push_back(node);
     }
@@ -125,72 +142,129 @@ vector <int> dijkstra(vector<vector<int>> graph, int src)
     cout << endl;
 }
 
-void FailLink(NodeContainer nodes, NetDeviceContainer link, NetDeviceContainer d02, Ipv4InterfaceContainer i02, shared_ptr<vector<vector<int>>> graph)
+// Handles link failure and updates the source's route using dijkstra 
+void FailLink(NodeContainer nodes, NetDeviceContainer link, vector<LinkInfo> links, shared_ptr<vector<vector<int>>> graph, uint32_t failedNodeA, uint32_t failedNodeB, uint32_t sourceNode, uint32_t destinationNode, Ipv4Address destination)
 {
-    Ptr<Ipv4> ipv4Node0 = nodes.Get(0)->GetObject<Ipv4>();
-    Ptr<Ipv4> ipv4Node1 = nodes.Get(1)->GetObject<Ipv4>();
+    
+    // Get the IPv4 objects of both nodes connected by the failed link
+    Ptr<Ipv4> ipv4NodeA =
+        nodes.Get(failedNodeA)->GetObject<Ipv4>();
 
-    uint32_t interface0 =
-        ipv4Node0->GetInterfaceForDevice(link.Get(0));
+    Ptr<Ipv4> ipv4NodeB =
+        nodes.Get(failedNodeB)->GetObject<Ipv4>();
 
-    uint32_t interface1 =
-        ipv4Node1->GetInterfaceForDevice(link.Get(1));
+    // Find the interface indices associated with the failed link
+    uint32_t interfaceA =
+        ipv4NodeA->GetInterfaceForDevice(link.Get(0));
 
-    ipv4Node0->SetDown(interface0);
-    ipv4Node1->SetDown(interface1);
+    uint32_t interfaceB =
+        ipv4NodeB->GetInterfaceForDevice(link.Get(1));
 
-    cout << "\nLINK FAILURE: Node 0 - Node 1 at " << Simulator::Now().GetSeconds() << " seconds\n";
+    // Disable both interfaces to simulate the physical link failure
+    ipv4NodeA->SetDown(interfaceA);
+    ipv4NodeB->SetDown(interfaceB);
 
-    // Remove the failed link from our Dijkstra graph
-    (*graph)[0][1] = 0;
-    (*graph)[1][0] = 0;
-    vector <int> path = dijkstra(*graph, 0);
-    // Check that a valid path to the destination exists
-    if (path.size() < 2) {
-    cout << "ERROR: No valid alternate path found!" << endl;
-    return;
-    }
-    int nextHop = path[1];
+    cout << "\nLINK FAILURE: Node "
+         << failedNodeA << " - Node " << failedNodeB
+         << " at " << Simulator::Now().GetSeconds()
+         << " seconds\n";
 
-    // Access Node 0's static routing table
-Ipv4StaticRoutingHelper routingHelper;
-Ptr<Ipv4StaticRouting> static0 =
-    routingHelper.GetStaticRouting(ipv4Node0);
+    // Remove the failed link from the graph in both directions
+    (*graph)[failedNodeA][failedNodeB] = 0;
+    (*graph)[failedNodeB][failedNodeA] = 0;
 
-// Remove the old route to Node 3
-Ipv4Address destination("10.1.2.2");
+    // Calculate the shortest available path from source to destination
+    vector<int> path =
+        dijkstra(*graph, sourceNode, destinationNode);
 
-for (uint32_t i = static0->GetNRoutes(); i > 0; )
-{
-    --i;
-    Ipv4RoutingTableEntry route = static0->GetRoute(i);
-
-    if (route.IsHost() && route.GetDest() == destination)
+    // Stop if no valid path to the destination exists
+    if (path.size() < 2)
     {
-        static0->RemoveRoute(i);
-        break;
+        cout << "ERROR: No valid alternate path found!" << endl;
+        return;
     }
-}
 
-// Install the route selected by Dijkstra
-if (nextHop == 2)
-{
+    // The second node in the path is the next hop
+    uint32_t nextHop = path[1];
+
+    // Find the physical link connecting the source to the selected next hop
+    const LinkInfo* selectedLink = nullptr;
+
+    for (const auto& candidate : links)
+    {
+        if ((candidate.nodeA == sourceNode &&
+             candidate.nodeB == nextHop) ||
+            (candidate.nodeA == nextHop &&
+             candidate.nodeB == sourceNode))
+        {
+            selectedLink = &candidate;
+            break;
+        }
+    }
+
+    // Stop if the required outgoing link cannot be found
+    if (selectedLink == nullptr)
+    {
+        cout << "ERROR: Link to selected next hop was not found!"
+             << endl;
+        return;
+    }
+
+    // Determine which device and IP interface belong to the source node
+    uint32_t sourceIndex =
+        (selectedLink->nodeA == sourceNode) ? 0 : 1;
+
+    uint32_t nextHopIndex = 1 - sourceIndex;
+
+    // Get the IPv4 object of the source node
+    Ptr<Ipv4> ipv4Source =
+        nodes.Get(sourceNode)->GetObject<Ipv4>();
+
+    // Find the outgoing interface on the source node
     uint32_t newInterface =
-        ipv4Node0->GetInterfaceForDevice(d02.Get(0));
+        ipv4Source->GetInterfaceForDevice(
+            selectedLink->devices.Get(sourceIndex)
+        );
 
-    static0->AddHostRouteTo(
+    // Get the gateway IP address of the next-hop node
+    Ipv4Address gateway =
+        selectedLink->interfaces.GetAddress(nextHopIndex);
+
+    // Access the static routing table of the source node
+    Ipv4StaticRoutingHelper routingHelper;
+
+    Ptr<Ipv4StaticRouting> staticSource =
+        routingHelper.GetStaticRouting(ipv4Source);
+
+    // Remove the previous host route to the destination
+    for (uint32_t i = staticSource->GetNRoutes(); i > 0; )
+    {
+        --i;
+
+        Ipv4RoutingTableEntry route =
+            staticSource->GetRoute(i);
+
+        if (route.IsHost() && route.GetDest() == destination)
+        {
+            staticSource->RemoveRoute(i);
+            break;
+        }
+    }
+
+    // Install a new route through the next hop selected by Dijkstra
+    staticSource->AddHostRouteTo(
         destination,
-        i02.GetAddress(1),
+        gateway,
         newInterface
     );
 
-    cout << "Dijkstra routing updated: Node 0 -> Node 2 -> Node 3"
-         << endl;
-}
+    cout << "Dijkstra routing updated: Node "
+         << sourceNode << " -> Node " << nextHop
+         << " -> Node " << destinationNode << endl;
 
+    // Recalculate the global routing tables after the topology change
     Ipv4GlobalRoutingHelper::RecomputeRoutingTables();
 
-    
 }
 
 void CollectMetrics(Ptr<FlowMonitor> monitor,Ptr<Ipv4FlowClassifier> classifier, double failureTime, double simulationEndTime){
@@ -224,7 +298,7 @@ void CollectMetrics(Ptr<FlowMonitor> monitor,Ptr<Ipv4FlowClassifier> classifier,
 
     double sampleTime = Simulator::Now().GetSeconds();
 
-    int futureFailure =(failureTime >= sampleTime && failureTime <= sampleTime + 2.0) ? 1 : 0;
+    int futureFailure =(failureTime > sampleTime && failureTime <= sampleTime + 2.0) ? 1 : 0;
 
     bool fileExists =
     ifstream("clean_time_window_dataset.csv").good();
@@ -318,13 +392,6 @@ int main(int argc, char *argv[])
     return 1;
     }
 
-    auto graph = make_shared<vector<vector<int>>>(4, vector<int>(4, 0));
-
-    AddEdge(*graph, 0, 1, 1);
-    AddEdge(*graph, 1, 3, 1);
-    AddEdge(*graph, 0, 2, 10);
-    AddEdge(*graph, 2, 3, 10);
-
 
     bool fileExists = ifstream("network_dataset.csv").good();
     ofstream dataset("network_dataset.csv", ios::app);
@@ -374,6 +441,26 @@ int main(int argc, char *argv[])
 
     address.SetBase("10.1.4.0", "255.255.255.0");
     Ipv4InterfaceContainer i23 = address.Assign(d23);
+
+    // Stores information about every physical link in the network
+    vector<LinkInfo> links;
+
+    // Register each link with its connected nodes, devices, and IP interfaces
+    links.push_back({1, 3, d13, i13,1}); // Link between Node 1 and Node 3
+    links.push_back({0, 2, d02, i02,10}); // Link between Node 0 and Node 2
+    links.push_back({2, 3, d23, i23,10}); // Link between Node 2 and Node 3
+    links.push_back({0, 1, d01, i01,1}); // Link between Node 0 and Node 1
+
+    // Create an adjacency matrix using the total number of network nodes
+    auto graph = make_shared<vector<vector<int>>>(
+    nodes.GetN(),
+    vector<int>(nodes.GetN(), 0)
+    );
+
+    // Build the graph using the registered physical links
+    for (const auto& link : links){
+    AddEdge(*graph, link.nodeA, link.nodeB, link.weight);
+    }
 
     // 6. Make Path B less preferable so traffic initially uses Path A
 Ptr<Ipv4> ipv4Node0 = nodes.Get(0)->GetObject<Ipv4>();
@@ -458,8 +545,7 @@ static3->AddHostRouteTo(i02.GetAddress(0), i23.GetAddress(0), if23Node3);
     );
 }
 // Schedule the actual link failure
-Simulator::Schedule(Seconds(failureTime),&FailLink, nodes, d01, d02, i02, graph
-);
+Simulator::Schedule(Seconds(failureTime),&FailLink, nodes, d01, links, graph,0,1,0,3,i13.GetAddress(1));
 // Start collecting metrics at 2 seconds
     Simulator::Schedule(
     Seconds(2.0),
