@@ -145,6 +145,11 @@ void FailLink(NodeContainer nodes, NetDeviceContainer link, NetDeviceContainer d
     (*graph)[0][1] = 0;
     (*graph)[1][0] = 0;
     vector <int> path = dijkstra(*graph, 0);
+    // Check that a valid path to the destination exists
+    if (path.size() < 2) {
+    cout << "ERROR: No valid alternate path found!" << endl;
+    return;
+    }
     int nextHop = path[1];
 
     // Access Node 0's static routing table
@@ -188,7 +193,7 @@ if (nextHop == 2)
     
 }
 
-void CollectMetrics(Ptr<FlowMonitor> monitor,Ptr<Ipv4FlowClassifier> classifier, double failureTime){
+void CollectMetrics(Ptr<FlowMonitor> monitor,Ptr<Ipv4FlowClassifier> classifier, double failureTime, double simulationEndTime){
     auto flowStats = monitor->GetFlowStats();
     static map<FlowId, FlowMonitor::FlowStats> previousStats;
 
@@ -204,6 +209,11 @@ void CollectMetrics(Ptr<FlowMonitor> monitor,Ptr<Ipv4FlowClassifier> classifier,
     uint64_t txPackets = stats.txPackets - previous.txPackets;
     uint64_t rxPackets = stats.rxPackets - previous.rxPackets;
     uint64_t rxBytes = stats.rxBytes - previous.rxBytes;
+    if (txPackets == 0){
+    previousStats[flow.first] = stats;
+    continue;
+    }
+
     Time delay = stats.delaySum - previous.delaySum;
 
     double pdr = txPackets > 0 ? (double)rxPackets / txPackets * 100.0 : 0.0;
@@ -214,19 +224,20 @@ void CollectMetrics(Ptr<FlowMonitor> monitor,Ptr<Ipv4FlowClassifier> classifier,
 
     double sampleTime = Simulator::Now().GetSeconds();
 
-    int futureFailure =(failureTime > sampleTime && failureTime <= sampleTime + 2.0) ? 1 : 0;
+    int futureFailure =(failureTime >= sampleTime && failureTime <= sampleTime + 2.0) ? 1 : 0;
 
     bool fileExists =
-    ifstream("time_window_dataset.csv").good();
+    ifstream("clean_time_window_dataset.csv").good();
 
-    ofstream dataset("time_window_dataset.csv", ios::app);
+    ofstream dataset("clean_time_window_dataset.csv", ios::app);
 
     if (!fileExists){
-    dataset << "sampleTime,txPackets,rxPackets,rxBytes,"
+    dataset << "sampleTime,flowId,txPackets,rxPackets,rxBytes,"
             << "pdr,avgDelayMs,throughputMbps,futureFailure,failureTime\n";
 }
 
 dataset << sampleTime << ","
+        << flow.first << ","
         << txPackets << ","
         << rxPackets << ","
         << rxBytes << ","
@@ -239,13 +250,14 @@ dataset << sampleTime << ","
     previousStats[flow.first] = stats;
 
     }
-    if (Simulator::Now().GetSeconds() < 12.0){
+    if (Simulator::Now().GetSeconds() < simulationEndTime){
     Simulator::Schedule(
         Seconds(1.0),
         &CollectMetrics,
         monitor,
         classifier,
-        failureTime
+        failureTime,
+        simulationEndTime
     );
 }
 }
@@ -269,10 +281,43 @@ int main(int argc, char *argv[])
 {
     //setting a default value for time after which failure will occur
     double failureTime = 5.0;
+    double degradationInterval = 1.0;
+    uint32_t degradationSteps = 3;
+    uint32_t initialDelayMs = 5;
+    uint32_t delayIncrementMs = 5;
+    // How long the simulation continues after the link fails
+    double postFailureDuration = 5.0;
+    
+
     // introducing cmd arguments to change time to showcase real time dynamic failures
     CommandLine cmd;
     cmd.AddValue("failureTime", "Time at which the link fails", failureTime);
+    cmd.AddValue("degradationInterval", "Interval between degradation events",degradationInterval);
+    cmd.AddValue("degradationSteps", "Number of degradation events", degradationSteps);
+    cmd.AddValue("initialDelayMs", "Initial degraded link delay", initialDelayMs);
+    cmd.AddValue("delayIncrementMs", "Delay increase at each step", delayIncrementMs);
     cmd.Parse(argc, argv);
+    double simulationEndTime = failureTime + postFailureDuration;
+
+    // Validating simulation parameters before starting
+    if (failureTime <= 0 ||
+    degradationInterval <= 0 ||
+    degradationSteps == 0 ||
+    postFailureDuration <= 0 ||
+    initialDelayMs == 0 ||
+    delayIncrementMs == 0) {
+
+    cerr << "ERROR: Invalid simulation parameters!" << endl;
+    return 1;
+    }
+
+    // Ensureingall degradation events happen before the failure
+    if (failureTime <= degradationInterval * degradationSteps) {
+    cerr << "ERROR: Failure time is too early for the degradation schedule!"
+         << endl;
+    return 1;
+    }
+
     auto graph = make_shared<vector<vector<int>>>(4, vector<int>(4, 0));
 
     AddEdge(*graph, 0, 1, 1);
@@ -378,7 +423,7 @@ static3->AddHostRouteTo(i02.GetAddress(0), i23.GetAddress(0), if23Node3);
     ApplicationContainer serverApp = server.Install(nodes.Get(3));
 
     serverApp.Start(Seconds(1.0));
-    serverApp.Stop(Seconds(12.0));
+    serverApp.Stop(Seconds(simulationEndTime));
 
     // 8. Install UDP Echo Client on Node 0
     UdpEchoClientHelper client(i13.GetAddress(1), 9);
@@ -390,7 +435,7 @@ static3->AddHostRouteTo(i02.GetAddress(0), i23.GetAddress(0), if23Node3);
     ApplicationContainer clientApp = client.Install(nodes.Get(0));
 
     clientApp.Start(Seconds(2.0));
-    clientApp.Stop(Seconds(12.0));
+    clientApp.Stop(Seconds(simulationEndTime));
 
     // 9. Run simulation
     FlowMonitorHelper flowmon;
@@ -399,12 +444,19 @@ static3->AddHostRouteTo(i02.GetAddress(0), i23.GetAddress(0), if23Node3);
     Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowmon.GetClassifier());
 
     // Gradually degrade the Node 0 - Node 1 link
-    Simulator::Schedule(Seconds(4.0), &ChangeLinkDelay, d01, MilliSeconds(5));
+    for (uint32_t i = 0; i < degradationSteps; i++){
+    double eventTime = failureTime -
+        (degradationSteps - i) * degradationInterval;
 
-    Simulator::Schedule( Seconds(5.0), &ChangeLinkDelay, d01, MilliSeconds(10));
+    uint32_t delayMs = initialDelayMs + i * delayIncrementMs;
 
-    Simulator::Schedule(Seconds(6.0), &ChangeLinkDelay, d01, MilliSeconds(20));
-
+    Simulator::Schedule(
+        Seconds(eventTime),
+        &ChangeLinkDelay,
+        d01,
+        MilliSeconds(delayMs)
+    );
+}
 // Schedule the actual link failure
 Simulator::Schedule(Seconds(failureTime),&FailLink, nodes, d01, d02, i02, graph
 );
@@ -414,10 +466,11 @@ Simulator::Schedule(Seconds(failureTime),&FailLink, nodes, d01, d02, i02, graph
     &CollectMetrics,
     monitor,
     classifier,
-    failureTime
+    failureTime,
+    simulationEndTime
 );
 
-    Simulator::Stop(Seconds(13.0));
+    Simulator::Stop(Seconds(simulationEndTime + 1.0));
 
     cout << "Starting 4-node diamond network simulation..." << endl;
 
