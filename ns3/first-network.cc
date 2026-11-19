@@ -266,16 +266,24 @@ void FailLink(NodeContainer nodes, NetDeviceContainer link, vector<LinkInfo> lin
         newInterface
     );
 
-    cout << "Dijkstra routing updated: Node "
-         << sourceNode << " -> Node " << nextHop
-         << " -> Node " << destinationNode << endl;
+    // Display every node in the complete selected route
+    cout << "Dijkstra routing updated: ";
+
+    for (size_t i = 0; i < path.size(); i++){
+    cout << "Node " << path[i];
+
+    if (i + 1 < path.size()){
+        cout << " -> ";}
+    }
+
+cout << endl;
 
     // Recalculate the global routing tables after the topology change
     Ipv4GlobalRoutingHelper::RecomputeRoutingTables();
 
 }
 
-void CollectMetrics(Ptr<FlowMonitor> monitor,Ptr<Ipv4FlowClassifier> classifier, double failureTime, double simulationEndTime){
+void CollectMetrics(Ptr<FlowMonitor> monitor,Ptr<Ipv4FlowClassifier> classifier, double failureTime, double secondFailureTime, double simulationEndTime){
     auto flowStats = monitor->GetFlowStats();
     static map<FlowId, FlowMonitor::FlowStats> previousStats;
 
@@ -306,16 +314,22 @@ void CollectMetrics(Ptr<FlowMonitor> monitor,Ptr<Ipv4FlowClassifier> classifier,
 
     double sampleTime = Simulator::Now().GetSeconds();
 
-    int futureFailure =(failureTime > sampleTime && failureTime <= sampleTime + 2.0) ? 1 : 0;
+    // Label the sample positive if either failure is within the next 2 seconds
+    bool firstFailureUpcoming = failureTime > sampleTime && failureTime <= sampleTime + 2.0;
+
+    bool secondFailureUpcoming = secondFailureTime > sampleTime && secondFailureTime <= sampleTime + 2.0;
+
+    int futureFailure = (firstFailureUpcoming || secondFailureUpcoming) ? 1 : 0;
 
     bool fileExists =
-    ifstream("clean_time_window_dataset.csv").good();
+    ifstream("multi_failure_dataset.csv").good();
 
-    ofstream dataset("clean_time_window_dataset.csv", ios::app);
+    ofstream dataset("multi_failure_dataset.csv", ios::app);
 
     if (!fileExists){
     dataset << "sampleTime,flowId,txPackets,rxPackets,rxBytes,"
-            << "pdr,avgDelayMs,throughputMbps,futureFailure,failureTime\n";
+            << "pdr,avgDelayMs,throughputMbps,futureFailure,"
+            << "failureTime,secondFailureTime\n";
 }
 
 dataset << sampleTime << ","
@@ -327,7 +341,8 @@ dataset << sampleTime << ","
         << avgDelayMs << ","
         << throughputMbps << ","
         << futureFailure << ","
-        << failureTime << "\n";
+        << failureTime << ","
+        << secondFailureTime<< "\n";
 
     previousStats[flow.first] = stats;
 
@@ -339,6 +354,7 @@ dataset << sampleTime << ","
         monitor,
         classifier,
         failureTime,
+        secondFailureTime,
         simulationEndTime
     );
 }
@@ -369,6 +385,11 @@ int main(int argc, char *argv[])
     uint32_t failureNodeA = 0;
     uint32_t failureNodeB = 1;
 
+    // Endpoints and time for the second link failure
+    double secondFailureTime = 7.0;
+    uint32_t secondFailureNodeA = 0;
+    uint32_t secondFailureNodeB = 2;
+
     uint32_t degradationSteps = 3;
     uint32_t initialDelayMs = 5;
     uint32_t delayIncrementMs = 5;
@@ -377,7 +398,7 @@ int main(int argc, char *argv[])
 
     // Configure the traffic endpoints
     uint32_t sourceNode = 0;
-    uint32_t destinationNode = 3;
+    uint32_t destinationNode = 5;
 
     // introducing cmd arguments to change time to showcase real time dynamic failures
     CommandLine cmd;
@@ -391,8 +412,11 @@ int main(int argc, char *argv[])
     // Allow the traffic endpoints to be selected from the command line
     cmd.AddValue("sourceNode", "Source node for network traffic", sourceNode);
     cmd.AddValue("destinationNode", "Destination node for network traffic", destinationNode);
+    cmd.AddValue("secondFailureTime", "Time at which the second link fails", secondFailureTime);
+    cmd.AddValue("secondFailureNodeA", "First endpoint of the second failing link", secondFailureNodeA);
+    cmd.AddValue("secondFailureNodeB", "Second endpoint of the second failing link", secondFailureNodeB);
     cmd.Parse(argc, argv);
-    double simulationEndTime = failureTime + postFailureDuration;
+    double simulationEndTime = secondFailureTime + postFailureDuration;
 
     // Validating simulation parameters before starting
     if (failureTime <= 0 ||
@@ -413,6 +437,13 @@ int main(int argc, char *argv[])
     return 1;
     }
 
+    // Ensure the second failure occurs after the first
+    if (secondFailureTime <= failureTime){
+    cerr << "ERROR: Second failure must occur after the first!"
+         << endl;
+    return 1;
+    }
+
 
     bool fileExists = ifstream("network_dataset.csv").good();
     ofstream dataset("network_dataset.csv", ios::app);
@@ -425,7 +456,7 @@ int main(int argc, char *argv[])
     LogComponentEnable("UdpEchoClientApplication", LOG_LEVEL_INFO);
     
     // Configure the number of nodes and traffic endpoints
-    uint32_t numNodes = 4;
+    uint32_t numNodes = 6;
 
     // Validate the selected traffic endpoints
     if (sourceNode >= numNodes ||
@@ -436,10 +467,23 @@ int main(int argc, char *argv[])
     }
 
     // Validate the selected failure link endpoints
-    if (failureNodeA >= numNodes ||
-    failureNodeB >= numNodes ||
-    failureNodeA == failureNodeB){
+    if (failureNodeA >= numNodes || failureNodeB >= numNodes || failureNodeA == failureNodeB){
     cerr << "ERROR: Invalid failure link endpoints!" << endl;
+    return 1;
+    }
+
+    // Validate the second failure link endpoints
+    if (secondFailureNodeA >= numNodes || secondFailureNodeB >= numNodes || secondFailureNodeA == secondFailureNodeB){
+    cerr << "ERROR: Invalid second failure link endpoints!" << endl;
+    return 1;
+    }
+
+    // Prevent the same link from failing twice
+    if ((failureNodeA == secondFailureNodeA &&
+     failureNodeB == secondFailureNodeB) ||
+    (failureNodeA == secondFailureNodeB &&
+     failureNodeB == secondFailureNodeA)){
+    cerr << "ERROR: Both failures cannot target the same link!" << endl;
     return 1;
     }
 
@@ -448,10 +492,15 @@ int main(int argc, char *argv[])
 
     // Define the connections that make up our network topology
     vector<LinkSpec> topology = {
-        {1, 3, 1},   // Node 1 - Node 3 (Path A)
-        {0, 2, 10},  // Node 0 - Node 2 (Path B)
-        {2, 3, 10},  // Node 2 - Node 3 (Path B)
-        {0, 1, 1}    // Node 0 - Node 1 (Path A)
+        {0, 1, 1},  // Primary route: Node 0 -> Node 1
+        {1, 5, 1},  // Primary route: Node 1 -> Node 5
+
+        {0, 2, 4},  // Alternate route: Node 0 -> Node 2
+        {2, 3, 4},  // Alternate route: Node 2 -> Node 3
+        {3, 5, 4},  // Alternate route: Node 3 -> Node 5
+
+        {0, 4, 7},  // Third route: Node 0 -> Node 4
+        {4, 5, 7}   // Third route: Node 4 -> Node 5
     };
 
 
@@ -551,6 +600,28 @@ int main(int argc, char *argv[])
     return 1;
     }
 
+    // Find the physical link selected for the second failure  
+    NetDeviceContainer secondFailureLink;
+    bool secondFailureLinkFound = false;
+
+    for (const auto& link : links){
+    // Check both endpoint orders because links are undirected
+    if ((link.nodeA == secondFailureNodeA &&
+         link.nodeB == secondFailureNodeB) ||
+        (link.nodeA == secondFailureNodeB &&
+         link.nodeB == secondFailureNodeA)){
+        secondFailureLink = link.devices;
+        secondFailureLinkFound = true;
+        break;
+        }
+    } 
+
+    // Stop if the second requested failure link does not exist
+    if (!secondFailureLinkFound){
+    cerr << "ERROR: Second failure link does not exist in topology!"
+         << endl;
+    return 1;
+    }
 
     // Create an adjacency matrix using the total number of network nodes
     auto graph = make_shared<vector<vector<int>>>(
@@ -624,6 +695,10 @@ int main(int argc, char *argv[])
 }
 // Schedule the actual link failure
 Simulator::Schedule(Seconds(failureTime),&FailLink, nodes, failureLink, links, graph,failureNodeA,failureNodeB,sourceNode,destinationNode,serverAddress);
+
+// Schedule the 2nd link failure
+Simulator::Schedule(Seconds(secondFailureTime), &FailLink, nodes, secondFailureLink, links, graph, secondFailureNodeA, secondFailureNodeB, sourceNode, destinationNode, serverAddress);
+
 // Start collecting metrics at 2 seconds
     Simulator::Schedule(
     Seconds(2.0),
@@ -631,12 +706,13 @@ Simulator::Schedule(Seconds(failureTime),&FailLink, nodes, failureLink, links, g
     monitor,
     classifier,
     failureTime,
+    secondFailureTime,
     simulationEndTime
 );
 
     Simulator::Stop(Seconds(simulationEndTime + 1.0));
 
-    cout << "Starting 4-node diamond network simulation..." << endl;
+    cout << "Starting 6-node network simulation..." << endl;
 
     Simulator::Run();
     monitor->CheckForLostPackets();
