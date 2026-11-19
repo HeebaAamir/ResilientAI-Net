@@ -17,6 +17,14 @@ using namespace std;
 using namespace ns3;
 NS_LOG_COMPONENT_DEFINE("FirstNetwork");
 
+// Describes a network link before it is installed
+struct LinkSpec
+{
+    uint32_t nodeA;  // First connected node
+    uint32_t nodeB;  // Second connected node
+    int weight;      // Routing cost of this link
+};
+
 // Stores all the information associated with a network link
 struct LinkInfo
 {
@@ -356,6 +364,11 @@ int main(int argc, char *argv[])
     //setting a default value for time after which failure will occur
     double failureTime = 5.0;
     double degradationInterval = 1.0;
+
+    // Endpoints of the link that will fail
+    uint32_t failureNodeA = 0;
+    uint32_t failureNodeB = 1;
+
     uint32_t degradationSteps = 3;
     uint32_t initialDelayMs = 5;
     uint32_t delayIncrementMs = 5;
@@ -367,6 +380,8 @@ int main(int argc, char *argv[])
     CommandLine cmd;
     cmd.AddValue("failureTime", "Time at which the link fails", failureTime);
     cmd.AddValue("degradationInterval", "Interval between degradation events",degradationInterval);
+    cmd.AddValue("failureNodeA", "First endpoint of the failing link", failureNodeA);
+    cmd.AddValue("failureNodeB", "Second endpoint of the failing link", failureNodeB);
     cmd.AddValue("degradationSteps", "Number of degradation events", degradationSteps);
     cmd.AddValue("initialDelayMs", "Initial degraded link delay", initialDelayMs);
     cmd.AddValue("delayIncrementMs", "Delay increase at each step", delayIncrementMs);
@@ -402,54 +417,101 @@ int main(int argc, char *argv[])
 
     LogComponentEnable("UdpEchoServerApplication", LOG_LEVEL_INFO);
     LogComponentEnable("UdpEchoClientApplication", LOG_LEVEL_INFO);
-    // 1. Create four nodes
+    
+    // Create the configured number of network nodes
+    uint32_t numNodes = 4;
     NodeContainer nodes;
-    nodes.Create(4);
+    nodes.Create(numNodes);
 
-    // 2. Configure point-to-point links
+    // Define the connections that make up our network topology
+    vector<LinkSpec> topology = {
+        {1, 3, 1},   // Node 1 - Node 3 (Path A)
+        {0, 2, 10},  // Node 0 - Node 2 (Path B)
+        {2, 3, 10},  // Node 2 - Node 3 (Path B)
+        {0, 1, 1}    // Node 0 - Node 1 (Path A)
+    };
+
+
+    // Configure the common point-to-point link properties
     PointToPointHelper p2p;
     p2p.SetDeviceAttribute("DataRate", StringValue("5Mbps"));
     p2p.SetChannelAttribute("Delay", StringValue("2ms"));
 
-    // 3. p2p helper pointer installs nodes 13,02 and 23
-    NetDeviceContainer d13 = p2p.Install(nodes.Get(1), nodes.Get(3));
-    NetDeviceContainer d02 = p2p.Install(nodes.Get(0), nodes.Get(2));
-    NetDeviceContainer d23 = p2p.Install(nodes.Get(2), nodes.Get(3));
 
-    PointToPointHelper p2p01;
-    p2p01.SetDeviceAttribute("DataRate", StringValue("5Mbps"));
-    p2p01.SetChannelAttribute("Delay", StringValue("2ms"));
-
-    // p2p01 helper pointer installs 01 node
-    NetDeviceContainer d01 = p2p01.Install(nodes.Get(0), nodes.Get(1));
-
-    // 4. Install the Internet stack
+    // Install Internet stack BEFORE installing links
     InternetStackHelper internet;
     internet.Install(nodes);
 
-    // 5. Assign IP addresses
-    Ipv4AddressHelper address;
-
-    address.SetBase("10.1.1.0", "255.255.255.0");
-    Ipv4InterfaceContainer i01 = address.Assign(d01);
-
-    address.SetBase("10.1.2.0", "255.255.255.0");
-    Ipv4InterfaceContainer i13 = address.Assign(d13);
-
-    address.SetBase("10.1.3.0", "255.255.255.0");
-    Ipv4InterfaceContainer i02 = address.Assign(d02);
-
-    address.SetBase("10.1.4.0", "255.255.255.0");
-    Ipv4InterfaceContainer i23 = address.Assign(d23);
-
-    // Stores information about every physical link in the network
+    // Stores all installed links and their assigned IP interfaces
     vector<LinkInfo> links;
 
-    // Register each link with its connected nodes, devices, and IP interfaces
-    links.push_back({1, 3, d13, i13,1}); // Link between Node 1 and Node 3
-    links.push_back({0, 2, d02, i02,10}); // Link between Node 0 and Node 2
-    links.push_back({2, 3, d23, i23,10}); // Link between Node 2 and Node 3
-    links.push_back({0, 1, d01, i01,1}); // Link between Node 0 and Node 1
+    // Install every link described in the topology
+    for (uint32_t i = 0; i < topology.size(); i++)
+    {
+        const auto& spec = topology[i];
+
+        // Connect the two nodes specified by this topology entry
+        NetDeviceContainer devices =
+            p2p.Install(nodes.Get(spec.nodeA), nodes.Get(spec.nodeB));
+
+        // Give each physical link its own /24 IP subnet
+        Ipv4AddressHelper address;
+        uint32_t subnetNumber = i + 1;
+
+        address.SetBase(
+            Ipv4Address(0x0A010000 + (subnetNumber << 8)),
+            Ipv4Mask("255.255.255.0")
+        );
+
+        // Assign IP addresses to both ends of the link
+        Ipv4InterfaceContainer interfaces = address.Assign(devices);
+
+        // Save all information about this installed link
+        links.push_back({
+            spec.nodeA,
+            spec.nodeB,
+            devices,
+            interfaces,
+            spec.weight
+        });
+    }
+
+    // Find the physical link selected for failure
+    NetDeviceContainer failureLink;
+    bool failureLinkFound = false;
+
+    for (const auto& link : links){
+    // Check both endpoint orders because links are undirected
+    if ((link.nodeA == failureNodeA &&
+         link.nodeB == failureNodeB) ||
+        (link.nodeA == failureNodeB &&
+         link.nodeB == failureNodeA)){
+        failureLink = link.devices;
+        failureLinkFound = true;
+        break;
+        }
+    }
+
+    // Stop if the requested failure link does not exist
+    if (!failureLinkFound)
+    {
+    cerr << "ERROR: Selected failure link does not exist in topology!"
+         << endl;
+    return 1;
+    }
+
+    // Temporary aliases used by the existing routing and traffic code
+    // These correspond to the current diamond topology's link ordering
+    NetDeviceContainer d13 = links[0].devices;
+    NetDeviceContainer d02 = links[1].devices;
+    NetDeviceContainer d23 = links[2].devices;
+    NetDeviceContainer d01 = links[3].devices;
+
+    Ipv4InterfaceContainer i13 = links[0].interfaces;
+    Ipv4InterfaceContainer i02 = links[1].interfaces;
+    Ipv4InterfaceContainer i23 = links[2].interfaces;
+    Ipv4InterfaceContainer i01 = links[3].interfaces;
+
 
     // Create an adjacency matrix using the total number of network nodes
     auto graph = make_shared<vector<vector<int>>>(
@@ -540,12 +602,12 @@ static3->AddHostRouteTo(i02.GetAddress(0), i23.GetAddress(0), if23Node3);
     Simulator::Schedule(
         Seconds(eventTime),
         &ChangeLinkDelay,
-        d01,
+        failureLink,
         MilliSeconds(delayMs)
     );
 }
 // Schedule the actual link failure
-Simulator::Schedule(Seconds(failureTime),&FailLink, nodes, d01, links, graph,0,1,0,3,i13.GetAddress(1));
+Simulator::Schedule(Seconds(failureTime),&FailLink, nodes, failureLink, links, graph,failureNodeA,failureNodeB,0,3,i13.GetAddress(1));
 // Start collecting metrics at 2 seconds
     Simulator::Schedule(
     Seconds(2.0),
