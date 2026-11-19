@@ -374,7 +374,10 @@ int main(int argc, char *argv[])
     uint32_t delayIncrementMs = 5;
     // How long the simulation continues after the link fails
     double postFailureDuration = 5.0;
-    
+
+    // Configure the traffic endpoints
+    uint32_t sourceNode = 0;
+    uint32_t destinationNode = 3;
 
     // introducing cmd arguments to change time to showcase real time dynamic failures
     CommandLine cmd;
@@ -385,6 +388,9 @@ int main(int argc, char *argv[])
     cmd.AddValue("degradationSteps", "Number of degradation events", degradationSteps);
     cmd.AddValue("initialDelayMs", "Initial degraded link delay", initialDelayMs);
     cmd.AddValue("delayIncrementMs", "Delay increase at each step", delayIncrementMs);
+    // Allow the traffic endpoints to be selected from the command line
+    cmd.AddValue("sourceNode", "Source node for network traffic", sourceNode);
+    cmd.AddValue("destinationNode", "Destination node for network traffic", destinationNode);
     cmd.Parse(argc, argv);
     double simulationEndTime = failureTime + postFailureDuration;
 
@@ -418,8 +424,25 @@ int main(int argc, char *argv[])
     LogComponentEnable("UdpEchoServerApplication", LOG_LEVEL_INFO);
     LogComponentEnable("UdpEchoClientApplication", LOG_LEVEL_INFO);
     
-    // Create the configured number of network nodes
+    // Configure the number of nodes and traffic endpoints
     uint32_t numNodes = 4;
+
+    // Validate the selected traffic endpoints
+    if (sourceNode >= numNodes ||
+    destinationNode >= numNodes ||
+    sourceNode == destinationNode){
+    cerr << "ERROR: Invalid source or destination node!" << endl;
+    return 1;
+    }
+
+    // Validate the selected failure link endpoints
+    if (failureNodeA >= numNodes ||
+    failureNodeB >= numNodes ||
+    failureNodeA == failureNodeB){
+    cerr << "ERROR: Invalid failure link endpoints!" << endl;
+    return 1;
+    }
+
     NodeContainer nodes;
     nodes.Create(numNodes);
 
@@ -476,6 +499,34 @@ int main(int argc, char *argv[])
         });
     }
 
+    // Find an IP address belonging to the destination node
+    Ipv4Address serverAddress;
+    bool serverAddressFound = false;
+
+    for (const auto& link : links){
+    // Check whether the destination is the first endpoint
+    if (link.nodeA == destinationNode){
+        serverAddress = link.interfaces.GetAddress(0);
+        serverAddressFound = true;
+        break;
+        }
+
+    // Check whether the destination is the second endpoint
+    if (link.nodeB == destinationNode) {
+        serverAddress = link.interfaces.GetAddress(1);
+        serverAddressFound = true;
+        break;
+        }
+    }
+
+    // Stop if the destination node has no connected links
+    if (!serverAddressFound)
+    {
+    cerr << "ERROR: Destination node has no connected links!"
+         << endl;
+    return 1;
+    }
+
     // Find the physical link selected for failure
     NetDeviceContainer failureLink;
     bool failureLinkFound = false;
@@ -500,18 +551,6 @@ int main(int argc, char *argv[])
     return 1;
     }
 
-    // Temporary aliases used by the existing routing and traffic code
-    // These correspond to the current diamond topology's link ordering
-    NetDeviceContainer d13 = links[0].devices;
-    NetDeviceContainer d02 = links[1].devices;
-    NetDeviceContainer d23 = links[2].devices;
-    NetDeviceContainer d01 = links[3].devices;
-
-    Ipv4InterfaceContainer i13 = links[0].interfaces;
-    Ipv4InterfaceContainer i02 = links[1].interfaces;
-    Ipv4InterfaceContainer i23 = links[2].interfaces;
-    Ipv4InterfaceContainer i01 = links[3].interfaces;
-
 
     // Create an adjacency matrix using the total number of network nodes
     auto graph = make_shared<vector<vector<int>>>(
@@ -524,64 +563,41 @@ int main(int argc, char *argv[])
     AddEdge(*graph, link.nodeA, link.nodeB, link.weight);
     }
 
-    // 6. Make Path B less preferable so traffic initially uses Path A
-Ptr<Ipv4> ipv4Node0 = nodes.Get(0)->GetObject<Ipv4>();
-Ptr<Ipv4> ipv4Node2 = nodes.Get(2)->GetObject<Ipv4>();
+    // Configure routing metrics for every physical link
+    for (const auto& link : links){
+    // Get the IPv4 objects of both connected nodes
+    Ptr<Ipv4> ipv4A = nodes.Get(link.nodeA)->GetObject<Ipv4>();
 
-uint32_t interface02 = ipv4Node0->GetInterfaceForDevice(d02.Get(0));
-uint32_t interface23 = ipv4Node2->GetInterfaceForDevice(d23.Get(0));
+    Ptr<Ipv4> ipv4B = nodes.Get(link.nodeB)->GetObject<Ipv4>();
 
-ipv4Node0->SetMetric(interface02, 10);
-ipv4Node2->SetMetric(interface23, 10);
+    // Find the interface belonging to this link on each node
+    uint32_t interfaceA = ipv4A->GetInterfaceForDevice(link.devices.Get(0));
 
-// Calculate routing tables
-Ipv4GlobalRoutingHelper::PopulateRoutingTables();
+    uint32_t interfaceB = ipv4B->GetInterfaceForDevice(link.devices.Get(1));
 
-Ipv4StaticRoutingHelper routingHelper;
+    // Apply the link's routing weight at both endpoints
+    ipv4A->SetMetric(interfaceA, link.weight);
+    ipv4B->SetMetric(interfaceB, link.weight);
+    }
 
-Ptr<Ipv4StaticRouting> static0 =
-    routingHelper.GetStaticRouting(nodes.Get(0)->GetObject<Ipv4>());
-
-Ptr<Ipv4StaticRouting> static2 =
-    routingHelper.GetStaticRouting(nodes.Get(2)->GetObject<Ipv4>());
-
-Ptr<Ipv4StaticRouting> static3 =
-    routingHelper.GetStaticRouting(nodes.Get(3)->GetObject<Ipv4>());
-
-// Get interface indices
-uint32_t if01 = nodes.Get(0)->GetObject<Ipv4>()->GetInterfaceForDevice(d01.Get(0));
-uint32_t if13 = nodes.Get(3)->GetObject<Ipv4>()->GetInterfaceForDevice(d13.Get(1));
-uint32_t if23Node2 = nodes.Get(2)->GetObject<Ipv4>()->GetInterfaceForDevice(d23.Get(0));
-uint32_t if23Node3 = nodes.Get(3)->GetObject<Ipv4>()->GetInterfaceForDevice(d23.Get(1));
-
-// Node 0 -> Node 3, initially through Node 1
-static0->AddHostRouteTo(i13.GetAddress(1), i01.GetAddress(1), if01);
-
-// Node 3 -> Node 0, return through Node 1
-static3->AddHostRouteTo(i01.GetAddress(0), i13.GetAddress(0), if13);
-
-// Node 2 -> Node 3, needed for the alternate path
-static2->AddHostRouteTo(i13.GetAddress(1), i23.GetAddress(1), if23Node2);
-
-// Node 3 -> Node 0's alternate address, through Node 2
-static3->AddHostRouteTo(i02.GetAddress(0), i23.GetAddress(0), if23Node3);
-
+    // Calculate routing tables using the configured metrics
+    Ipv4GlobalRoutingHelper::PopulateRoutingTables();
 
     // 7. Install UDP Echo Server on Node 3
     UdpEchoServerHelper server(9);
-    ApplicationContainer serverApp = server.Install(nodes.Get(3));
+    ApplicationContainer serverApp = server.Install(nodes.Get(destinationNode));
 
     serverApp.Start(Seconds(1.0));
     serverApp.Stop(Seconds(simulationEndTime));
 
     // 8. Install UDP Echo Client on Node 0
-    UdpEchoClientHelper client(i13.GetAddress(1), 9);
+    UdpEchoClientHelper client(serverAddress, 9);
 
     client.SetAttribute("MaxPackets", UintegerValue(10));
     client.SetAttribute("Interval", TimeValue(Seconds(1.0)));
     client.SetAttribute("PacketSize", UintegerValue(1024));
 
-    ApplicationContainer clientApp = client.Install(nodes.Get(0));
+    ApplicationContainer clientApp = client.Install(nodes.Get(sourceNode));
 
     clientApp.Start(Seconds(2.0));
     clientApp.Stop(Seconds(simulationEndTime));
@@ -607,7 +623,7 @@ static3->AddHostRouteTo(i02.GetAddress(0), i23.GetAddress(0), if23Node3);
     );
 }
 // Schedule the actual link failure
-Simulator::Schedule(Seconds(failureTime),&FailLink, nodes, failureLink, links, graph,failureNodeA,failureNodeB,0,3,i13.GetAddress(1));
+Simulator::Schedule(Seconds(failureTime),&FailLink, nodes, failureLink, links, graph,failureNodeA,failureNodeB,sourceNode,destinationNode,serverAddress);
 // Start collecting metrics at 2 seconds
     Simulator::Schedule(
     Seconds(2.0),
