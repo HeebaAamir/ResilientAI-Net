@@ -12,6 +12,7 @@
 #include <climits>
 #include <algorithm>
 #include <map>
+#include <sstream>
 
 using namespace std;
 using namespace ns3;
@@ -283,7 +284,8 @@ cout << endl;
 
 }
 
-void CollectMetrics(Ptr<FlowMonitor> monitor,Ptr<Ipv4FlowClassifier> classifier, double failureTime, double secondFailureTime, double simulationEndTime){
+void CollectMetrics(Ptr<FlowMonitor> monitor,Ptr<Ipv4FlowClassifier> classifier, double failureTime, uint32_t failureNodeA, uint32_t failureNodeB, 
+    double secondFailureTime, uint32_t secondFailureNodeA, uint32_t secondFailureNodeB, uint32_t runId, double simulationEndTime){
     auto flowStats = monitor->GetFlowStats();
     static map<FlowId, FlowMonitor::FlowStats> previousStats;
 
@@ -322,17 +324,20 @@ void CollectMetrics(Ptr<FlowMonitor> monitor,Ptr<Ipv4FlowClassifier> classifier,
     int futureFailure = (firstFailureUpcoming || secondFailureUpcoming) ? 1 : 0;
 
     bool fileExists =
-    ifstream("multi_failure_dataset.csv").good();
+    ifstream("multi_failure_dataset_v2.csv").good();
 
-    ofstream dataset("multi_failure_dataset.csv", ios::app);
+    ofstream dataset("multi_failure_dataset_v2.csv", ios::app);
 
+    //Write the header only when creating the file
     if (!fileExists){
-    dataset << "sampleTime,flowId,txPackets,rxPackets,rxBytes,"
+    dataset << "runId,sampleTime,flowId,txPackets,rxPackets,rxBytes,"
             << "pdr,avgDelayMs,throughputMbps,futureFailure,"
-            << "failureTime,secondFailureTime\n";
+            << "failureTime,failureNodeA,failureNodeB,"
+            << "secondFailureTime,secondFailureNodeA,secondFailureNodeB\n";
 }
 
-dataset << sampleTime << ","
+dataset << runId << ","
+        << sampleTime << ","
         << flow.first << ","
         << txPackets << ","
         << rxPackets << ","
@@ -342,7 +347,11 @@ dataset << sampleTime << ","
         << throughputMbps << ","
         << futureFailure << ","
         << failureTime << ","
-        << secondFailureTime<< "\n";
+        << failureNodeA << ","
+        << failureNodeB << ","
+        << secondFailureTime<< ","
+        << secondFailureNodeA << ","
+        << secondFailureNodeB << "\n";
 
     previousStats[flow.first] = stats;
 
@@ -354,10 +363,48 @@ dataset << sampleTime << ","
         monitor,
         classifier,
         failureTime,
+        failureNodeA,
+        failureNodeB,
         secondFailureTime,
+        secondFailureNodeA,
+        secondFailureNodeB,
+        runId,
         simulationEndTime
     );
 }
+}
+
+// Finds the highest run ID already stored in the dataset
+// and returns the next available ID.
+uint32_t GetNextRunId(const string& filename)
+{
+    ifstream input(filename);
+    string line;
+    uint32_t maxRunId = 0;
+
+    // Start from 1 if the dataset file does not exist yet
+    if (!input.is_open())
+    {
+        return 1;
+    }
+
+    // Skip the CSV header
+    getline(input, line);
+
+    // Read the run ID from the first column of every data row
+    while (getline(input, line))
+    {
+        string firstColumn;
+        stringstream row(line);
+
+        if (getline(row, firstColumn, ',') && !firstColumn.empty())
+        {
+            uint32_t currentRunId = stoul(firstColumn);
+            maxRunId = max(maxRunId, currentRunId);
+        }
+    }
+
+    return maxRunId + 1;
 }
 
 void ChangeLinkDelay(NetDeviceContainer link, Time newDelay)
@@ -679,6 +726,10 @@ int main(int argc, char *argv[])
 
     Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowmon.GetClassifier());
 
+    // Assign a unique ID to this simulation execution
+    uint32_t runId = GetNextRunId("multi_failure_dataset_v2.csv");
+    cout << "Dataset run ID: " << runId << endl;
+
     // Gradually degrade the Node 0 - Node 1 link
     for (uint32_t i = 0; i < degradationSteps; i++){
     double eventTime = failureTime -
@@ -706,7 +757,12 @@ Simulator::Schedule(Seconds(secondFailureTime), &FailLink, nodes, secondFailureL
     monitor,
     classifier,
     failureTime,
+    failureNodeA,
+    failureNodeB,
     secondFailureTime,
+    secondFailureNodeA,
+    secondFailureNodeB,
+    runId,
     simulationEndTime
 );
 
