@@ -595,32 +595,50 @@ int main(int argc, char *argv[])
         });
     }
 
-    // Find an IP address belonging to the destination node
+    // Find a destination IP address on a link that will remain active
     Ipv4Address serverAddress;
     bool serverAddressFound = false;
 
     for (const auto& link : links){
-    // Check whether the destination is the first endpoint
-    if (link.nodeA == destinationNode){
+    // Check whether this link is scheduled for the first failure
+    bool firstFailureLink =
+        (link.nodeA == failureNodeA && link.nodeB == failureNodeB) ||
+        (link.nodeA == failureNodeB && link.nodeB == failureNodeA);
+
+    // Check whether this link is scheduled for the second failure
+    bool secondFailureLink =
+        (link.nodeA == secondFailureNodeA &&
+         link.nodeB == secondFailureNodeB) ||
+        (link.nodeA == secondFailureNodeB &&
+         link.nodeB == secondFailureNodeA);
+
+    // Skip links that are scheduled to fail
+    if (firstFailureLink || secondFailureLink)
+    {
+        continue;
+    }
+
+    // Select an active interface belonging to the destination
+    if (link.nodeA == destinationNode)
+    {
         serverAddress = link.interfaces.GetAddress(0);
         serverAddressFound = true;
         break;
-        }
+    }
 
-    // Check whether the destination is the second endpoint
-    if (link.nodeB == destinationNode) {
+    if (link.nodeB == destinationNode)
+    {
         serverAddress = link.interfaces.GetAddress(1);
         serverAddressFound = true;
         break;
-        }
     }
+}
 
-    // Stop if the destination node has no connected links
+    // Stop if no surviving destination interface was found
     if (!serverAddressFound)
     {
-    cerr << "ERROR: Destination node has no connected links!"
-         << endl;
-    return 1;
+        cerr << "ERROR: No active destination interface found!" << endl;
+        return 1;
     }
 
     // Find the physical link selected for failure
