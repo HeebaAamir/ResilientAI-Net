@@ -41,7 +41,62 @@ struct LinkInfo
 
     // Cost of using this link during shortest-path calculation
     int weight; 
+    uint32_t linkId;
+    bool linkUp;
 };
+
+struct LinkMetrics
+{
+    uint64_t txPackets = 0;
+    uint64_t droppedPackets = 0;
+    // Packets dropped before transmission by the device queue.
+    uint64_t queueDroppedPackets = 0;
+    double delaySumMs = 0;
+    uint64_t delaySamples = 0;
+    
+};
+
+map<uint32_t, LinkMetrics> linkMetrics;
+map<pair<uint32_t, uint64_t>, Time> linkTxTimes;
+
+void LinkTx(uint32_t id, Ptr<const Packet> packet)
+{
+    linkMetrics[id].txPackets++;
+    linkTxTimes[{id, packet->GetUid()}] = Simulator::Now();
+}
+
+void LinkRx(uint32_t id, Ptr<const Packet> packet)
+{
+    auto key = make_pair(id, packet->GetUid());
+    auto it = linkTxTimes.find(key);
+
+    if (it != linkTxTimes.end())
+    {
+        double delay =
+            (Simulator::Now() - it->second).GetMilliSeconds();
+
+        linkMetrics[id].delaySumMs += delay;
+        linkMetrics[id].delaySamples++;
+        linkTxTimes.erase(it);
+    }
+}
+
+// Record packets dropped by a link or its device queue.
+void LinkDrop(uint32_t id, Ptr<const Packet> packet)
+{
+    // Increase the number of observed dropped packets.
+    linkMetrics[id].droppedPackets++;
+
+    // Remove the packet's pending transmission timestamp.
+    linkTxTimes.erase({id, packet->GetUid()});
+}
+
+// Record packets dropped by a link or its device queue.
+void LinkQueueDrop(uint32_t id, Ptr<const Packet> packet)
+{
+    // Count queue drops separately from reception drops.
+    linkMetrics[id].queueDroppedPackets++;
+}
 
 void AddEdge(vector<vector<int>>& graph, int u, int v, int weight)
 {
@@ -140,7 +195,7 @@ vector <int> dijkstra(vector<vector<int>> graph, int src, int destination)
 }
 
 // Handles link failure and updates the source's route using dijkstra 
-void FailLink(NodeContainer nodes, NetDeviceContainer link, vector<LinkInfo> links, shared_ptr<vector<vector<int>>> graph, uint32_t failedNodeA, uint32_t failedNodeB, uint32_t sourceNode, uint32_t destinationNode, Ipv4Address destination)
+void FailLink(NodeContainer nodes, NetDeviceContainer link, vector<LinkInfo>* links, shared_ptr<vector<vector<int>>> graph, uint32_t failedNodeA, uint32_t failedNodeB, uint32_t sourceNode, uint32_t destinationNode, Ipv4Address destination)
 {
     
     // Get the IPv4 objects of both nodes connected by the failed link
@@ -160,6 +215,15 @@ void FailLink(NodeContainer nodes, NetDeviceContainer link, vector<LinkInfo> lin
     // Disable both interfaces to simulate the physical link failure
     ipv4NodeA->SetDown(interfaceA);
     ipv4NodeB->SetDown(interfaceB);
+
+    // Mark the failed physical link as down
+    for (auto& info : *links){
+    if ((info.nodeA == failedNodeA && info.nodeB == failedNodeB) ||
+        (info.nodeA == failedNodeB && info.nodeB == failedNodeA)){
+        info.linkUp = false;
+        break;
+        }
+    }
 
     cout << "\nLINK FAILURE: Node "
          << failedNodeA << " - Node " << failedNodeB
@@ -187,7 +251,7 @@ void FailLink(NodeContainer nodes, NetDeviceContainer link, vector<LinkInfo> lin
     // Find the physical link connecting the source to the selected next hop
     const LinkInfo* selectedLink = nullptr;
 
-    for (const auto& candidate : links)
+    for (const auto& candidate : *links)
     {
         if ((candidate.nodeA == sourceNode &&
              candidate.nodeB == nextHop) ||
@@ -365,6 +429,76 @@ dataset << runId << ","
 }
 }
 
+void CollectLinkMetrics(
+    vector<LinkInfo>* links,
+    uint32_t runId,
+    double simulationEndTime)
+{
+    double now = Simulator::Now().GetSeconds();
+
+    bool exists = ifstream("per_link_metrics.csv").good();
+    ofstream file("per_link_metrics.csv", ios::app);
+
+    if (!exists)
+    {
+        file << "run_id,time,link_id,delay_ms,loss_rate,"
+             << "queue_occ,link_up\n";
+    }
+
+    for (auto& link : *links)
+    {
+        // Read the number of packets transmitted on this link.
+        uint64_t tx = linkMetrics[link.linkId].txPackets;
+
+        // Read the number of packets rejected by the device queues.
+        uint64_t queueDrops = linkMetrics[link.linkId].queueDroppedPackets;
+        uint64_t samples = linkMetrics[link.linkId].delaySamples;
+
+        double delayMs = samples > 0
+            ? linkMetrics[link.linkId].delaySumMs / samples
+            : -1.0;
+
+        // Calculate the observed queue-drop ratio for this sampling interval.
+        double lossRate = (tx + queueDrops) > 0
+            ? static_cast<double>(queueDrops) / (tx + queueDrops)
+            : -1.0;
+
+        uint32_t queueOcc = 0;
+
+        for (uint32_t side = 0; side < 2; side++)
+        {
+            Ptr<PointToPointNetDevice> device =
+                DynamicCast<PointToPointNetDevice>(
+                    link.devices.Get(side));
+
+            if (device && device->GetQueue())
+            {
+                queueOcc += device->GetQueue()->GetNPackets();
+            }
+        }
+
+        file << runId << ","
+             << now << ","
+             << link.linkId << ","
+             << delayMs << ","
+             << lossRate << ","
+             << queueOcc << ","
+             << (link.linkUp ? 1 : 0) << "\n";
+
+        linkMetrics[link.linkId] = LinkMetrics{};
+    }
+
+    if (now + 1.0 <= simulationEndTime)
+    {
+        Simulator::Schedule(
+            Seconds(1.0),
+            &CollectLinkMetrics,
+            links,
+            runId,
+            simulationEndTime);
+    }
+}
+
 // Finds the highest run ID already stored in the dataset
 // and returns the next available ID.
 uint32_t GetNextRunId(const string& filename)
@@ -441,8 +575,15 @@ int main(int argc, char *argv[])
     // Time between consecutive UDP packets
     double trafficInterval = 0.1;
 
+    // Configure the random seed and independent simulation run.
+    uint32_t seed = 1;
+    uint64_t runNumber = 1;
+
     // introducing cmd arguments to change time to showcase real time dynamic failures
     CommandLine cmd;
+    // Allow each simulation to use a reproducible seed and run number.
+    cmd.AddValue("seed", "Random number generator seed", seed);
+    cmd.AddValue("runNumber", "Independent random number generator run", runNumber);
     cmd.AddValue("failureTime", "Time at which the link fails", failureTime);
     cmd.AddValue("degradationInterval", "Interval between degradation events",degradationInterval);
     cmd.AddValue("failureNodeA", "First endpoint of the failing link", failureNodeA);
@@ -458,6 +599,12 @@ int main(int argc, char *argv[])
     cmd.AddValue("secondFailureNodeA", "First endpoint of the second failing link", secondFailureNodeA);
     cmd.AddValue("secondFailureNodeB", "Second endpoint of the second failing link", secondFailureNodeB);
     cmd.Parse(argc, argv);
+
+    // Apply the selected seed and independent run number before simulation.
+    RngSeedManager::SetSeed(seed);
+    RngSeedManager::SetRun(runNumber);
+    cout << "Random seed: " << seed << " | Random run: " << runNumber << endl;
+    
     double simulationEndTime = secondFailureTime + postFailureDuration;
 
     // Validating simulation parameters before starting
@@ -586,8 +733,34 @@ int main(int argc, char *argv[])
             spec.nodeB,
             devices,
             interfaces,
-            spec.weight
+            spec.weight,
+            i,
+            true
         });
+
+        // Connect packet transmission and reception traces for both ends of this physical link so we can measure its delay and traffic.
+
+        // Device at the first endpoint
+        Ptr<PointToPointNetDevice> deviceA = DynamicCast<PointToPointNetDevice>(devices.Get(0));
+
+        // Device at the second endpoint
+        Ptr<PointToPointNetDevice> deviceB = DynamicCast<PointToPointNetDevice>(devices.Get(1));
+
+        // Record packets transmitted by either endpoint
+        deviceA->TraceConnectWithoutContext("MacTx", MakeBoundCallback(&LinkTx, i));
+        deviceB->TraceConnectWithoutContext("MacTx", MakeBoundCallback(&LinkTx, i));
+
+        // Record packets received by either endpoint
+        deviceA->TraceConnectWithoutContext("MacRx", MakeBoundCallback(&LinkRx, i));
+        deviceB->TraceConnectWithoutContext("MacRx", MakeBoundCallback(&LinkRx, i));
+
+        // Record packets dropped during reception
+        deviceA->TraceConnectWithoutContext("PhyRxDrop", MakeBoundCallback(&LinkDrop, i));
+        deviceB->TraceConnectWithoutContext("PhyRxDrop", MakeBoundCallback(&LinkDrop, i));
+
+        // Record packets dropped from the transmission queues.
+        deviceA->GetQueue()->TraceConnectWithoutContext("Drop", MakeBoundCallback(&LinkQueueDrop, i));
+        deviceB->GetQueue()->TraceConnectWithoutContext("Drop", MakeBoundCallback(&LinkQueueDrop, i));
     }
 
     // Find a destination IP address on a link that will remain active
@@ -759,10 +932,10 @@ int main(int argc, char *argv[])
     );
 }
 // Schedule the actual link failure
-Simulator::Schedule(Seconds(failureTime),&FailLink, nodes, failureLink, links, graph,failureNodeA,failureNodeB,sourceNode,destinationNode,serverAddress);
+Simulator::Schedule(Seconds(failureTime),&FailLink, nodes, failureLink, &links, graph,failureNodeA,failureNodeB,sourceNode,destinationNode,serverAddress);
 
 // Schedule the 2nd link failure
-Simulator::Schedule(Seconds(secondFailureTime), &FailLink, nodes, secondFailureLink, links, graph, secondFailureNodeA, secondFailureNodeB, sourceNode, destinationNode, serverAddress);
+Simulator::Schedule(Seconds(secondFailureTime), &FailLink, nodes, secondFailureLink, &links, graph, secondFailureNodeA, secondFailureNodeB, sourceNode, destinationNode, serverAddress);
 
 // Start collecting metrics at 2 seconds
     Simulator::Schedule(
@@ -779,6 +952,16 @@ Simulator::Schedule(Seconds(secondFailureTime), &FailLink, nodes, secondFailureL
     runId,
     simulationEndTime,
     trafficInterval
+);
+
+// Start recording per-link metrics at 2 seconds.
+// Collect one row per physical link at each sampling interval.
+Simulator::Schedule(
+    Seconds(2.0),
+    &CollectLinkMetrics,
+    &links,
+    runId,
+    simulationEndTime
 );
 
     Simulator::Stop(Seconds(simulationEndTime + 1.0));
