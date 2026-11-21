@@ -137,18 +137,6 @@ vector <int> dijkstra(vector<vector<int>> graph, int src, int destination)
     reverse(path.begin(), path.end());
     return path;
 
-    // Print the path in the correct direction
-    cout << "Shortest path: ";
-
-    for (int i = path.size() - 1; i >= 0; i--)
-    {
-        cout << path[i];
-
-        if (i != 0)
-            cout << " -> ";
-    }
-
-    cout << endl;
 }
 
 // Handles link failure and updates the source's route using dijkstra 
@@ -285,7 +273,7 @@ cout << endl;
 }
 
 void CollectMetrics(Ptr<FlowMonitor> monitor,Ptr<Ipv4FlowClassifier> classifier, double failureTime, uint32_t failureNodeA, uint32_t failureNodeB, 
-    double secondFailureTime, uint32_t secondFailureNodeA, uint32_t secondFailureNodeB, uint32_t runId, double simulationEndTime){
+    double secondFailureTime, uint32_t secondFailureNodeA, uint32_t secondFailureNodeB, uint32_t runId, double simulationEndTime, double trafficInterval){
     auto flowStats = monitor->GetFlowStats();
     static map<FlowId, FlowMonitor::FlowStats> previousStats;
 
@@ -324,16 +312,17 @@ void CollectMetrics(Ptr<FlowMonitor> monitor,Ptr<Ipv4FlowClassifier> classifier,
     int futureFailure = (firstFailureUpcoming || secondFailureUpcoming) ? 1 : 0;
 
     bool fileExists =
-    ifstream("multi_failure_dataset_v2.csv").good();
+    ifstream("multi_failure_dataset_v3.csv").good();
 
-    ofstream dataset("multi_failure_dataset_v2.csv", ios::app);
+    ofstream dataset("multi_failure_dataset_v3.csv", ios::app);
 
     //Write the header only when creating the file
     if (!fileExists){
     dataset << "runId,sampleTime,flowId,txPackets,rxPackets,rxBytes,"
             << "pdr,avgDelayMs,throughputMbps,futureFailure,"
             << "failureTime,failureNodeA,failureNodeB,"
-            << "secondFailureTime,secondFailureNodeA,secondFailureNodeB\n";
+            << "secondFailureTime,secondFailureNodeA,secondFailureNodeB,"
+            << "trafficInterval\n";
 }
 
 dataset << runId << ","
@@ -351,7 +340,8 @@ dataset << runId << ","
         << failureNodeB << ","
         << secondFailureTime<< ","
         << secondFailureNodeA << ","
-        << secondFailureNodeB << "\n";
+        << secondFailureNodeB << ","
+        << trafficInterval << "\n";
 
     previousStats[flow.first] = stats;
 
@@ -369,7 +359,8 @@ dataset << runId << ","
         secondFailureNodeA,
         secondFailureNodeB,
         runId,
-        simulationEndTime
+        simulationEndTime,
+        trafficInterval
     );
 }
 }
@@ -447,6 +438,9 @@ int main(int argc, char *argv[])
     uint32_t sourceNode = 0;
     uint32_t destinationNode = 5;
 
+    // Time between consecutive UDP packets
+    double trafficInterval = 0.1;
+
     // introducing cmd arguments to change time to showcase real time dynamic failures
     CommandLine cmd;
     cmd.AddValue("failureTime", "Time at which the link fails", failureTime);
@@ -459,6 +453,7 @@ int main(int argc, char *argv[])
     // Allow the traffic endpoints to be selected from the command line
     cmd.AddValue("sourceNode", "Source node for network traffic", sourceNode);
     cmd.AddValue("destinationNode", "Destination node for network traffic", destinationNode);
+    cmd.AddValue("trafficInterval", "Time between consecutive UDP packets", trafficInterval);
     cmd.AddValue("secondFailureTime", "Time at which the second link fails", secondFailureTime);
     cmd.AddValue("secondFailureNodeA", "First endpoint of the second failing link", secondFailureNodeA);
     cmd.AddValue("secondFailureNodeB", "Second endpoint of the second failing link", secondFailureNodeB);
@@ -729,8 +724,9 @@ int main(int argc, char *argv[])
     // 8. Install UDP Echo Client on Node 0
     UdpEchoClientHelper client(serverAddress, 9);
 
-    client.SetAttribute("MaxPackets", UintegerValue(10));
-    client.SetAttribute("Interval", TimeValue(Seconds(1.0)));
+    // Generate more frequent traffic for meaningful network measurements
+    client.SetAttribute("MaxPackets", UintegerValue(10000));
+    client.SetAttribute("Interval", TimeValue(Seconds(trafficInterval)));
     client.SetAttribute("PacketSize", UintegerValue(1024));
 
     ApplicationContainer clientApp = client.Install(nodes.Get(sourceNode));
@@ -745,7 +741,7 @@ int main(int argc, char *argv[])
     Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowmon.GetClassifier());
 
     // Assign a unique ID to this simulation execution
-    uint32_t runId = GetNextRunId("multi_failure_dataset_v2.csv");
+    uint32_t runId = GetNextRunId("multi_failure_dataset_v3.csv");
     cout << "Dataset run ID: " << runId << endl;
 
     // Gradually degrade the Node 0 - Node 1 link
@@ -781,7 +777,8 @@ Simulator::Schedule(Seconds(secondFailureTime), &FailLink, nodes, secondFailureL
     secondFailureNodeA,
     secondFailureNodeB,
     runId,
-    simulationEndTime
+    simulationEndTime,
+    trafficInterval
 );
 
     Simulator::Stop(Seconds(simulationEndTime + 1.0));
