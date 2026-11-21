@@ -48,3 +48,9 @@ ax.set_xlabel("Time (s)"); ax.set_ylabel("Risk"); ax.set_title(f"Run {run}: pred
 ax.legend(); ax.grid(alpha=.3); plt.tight_layout()
 plt.savefig("outputs/fig_example_run.png", dpi=150); plt.close()
 print("saved 3 figures in outputs/")
+from sklearn.metrics import confusion_matrix
+for t in [0.7, 0.75, 0.8]:
+    pred = (ev.risk >= t).astype(int)
+    tn, fp, fn, tp = confusion_matrix(ev.label, pred, labels=[0, 1]).ravel()
+    print(f"th={t}  precision={tp/(tp+fp) if tp+fp else 0:.2f}  recall={tp/(tp+fn):.2f}  "
+          f"false_alarm={fp/(fp+tn):.3f}  alerts={tp+fp}")

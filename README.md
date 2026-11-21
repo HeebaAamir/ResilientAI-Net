@@ -70,14 +70,14 @@ Predict, for **each individual link**, whether it will go down within the **next
 
 **Training set:** 1441 rows, 25 runs, 100 positive cases (about 6.9%, so random guessing gives about 0.07 precision).
 
-**Main result (without `links_down_now`), threshold 0.7:**
+**Main result (without `links_down_now`), tested on unseen runs:**
 
-| Metric | Value |
-| --- | --- |
-| Precision | 0.39 |
-| Recall | 0.63 |
-| F1-score | 0.48 |
-| False alarm rate | 0.07 |
+| Threshold | Precision | Recall | False alarm rate | Alerts raised |
+| --- | --- | --- | --- | --- |
+| **0.75 (chosen)** | **1.00** | **0.42** | **0.000** | **42** |
+| 0.70 (higher recall option) | 0.39 | 0.63 | 0.073 | 161 |
+
+Of the 100 real "failure within 2 seconds" cases, the model catches 42 at threshold 0.75 with no false alarms, and 63 at threshold 0.70 at the cost of 98 false alarms.
 
 **Most important feature:** `delay`, followed by `delay_diff` and `has_traffic`.
 
@@ -85,7 +85,7 @@ Predict, for **each individual link**, whether it will go down within the **next
 
 **Earlier flow-level model** (`train_rf.py`, first CSV with per-flow metrics): precision 0.94, recall 0.79, false alarm 0.02 at threshold 0.5. This used a small dataset (310 rows) and flow-level, not link-level, data. Its files are kept with the suffix `OLD`.
 
-**Recommended threshold:** risk >= 0.7 (scores between 0.3 and 0.6 behaved almost the same in the main model).
+**Recommended threshold:** risk >= **0.75** (used as the fixed threshold for Method B, Random Forest with proactive switching). It gives the best F1 (about 0.59) and no false alarms, which avoids unnecessary route changes. Thresholds from 0.75 to 0.9 give identical results, because the model's most confident scores form one group. Use 0.70 if catching more failures matters more than avoiding false alarms.
 
 ---
 
@@ -108,6 +108,7 @@ Predict, for **each individual link**, whether it will go down within the **next
 - Each score uses information up to that second only, so it can be used live during a simulation.
 - For a path, the suggested path risk is the **maximum** risk over its links.
 - The Q-table needs discrete states, so the numeric risk must be binned (for example rounded to 0.25) on the Q-learning side.
+- **Suggested alert cutoff:** `risk >= 0.75` (the `risk_level` label "high" uses a lower cutoff of 0.7, so for threshold-based switching use the numeric `risk` column).
 
 ---
 
@@ -155,5 +156,5 @@ python make_plots.py           # saves 3 figures in outputs/
 - **Only two links fail regularly** (links 0 and 2), and link 5 failed in a single run, so the model mainly learns these two links.
 - **Weak signals:** queue occupancy and loss are always 0, and delay exists only when traffic is on the link, so delay is the main usable signal.
 - **Failure scenario is fixed:** the usual order is link 0 first, then link 2, so results may not carry over to other failure patterns.
-- **Modest scores:** precision 0.39 at recall 0.63 is better than random guessing, but it should be used as one input to routing, not the only one.
+- **Recall is limited:** at the chosen threshold the model catches about 42% of coming failures (all alerts were correct), and the rest are missed. A precision of 1.00 comes from only 42 alerts on a small dataset (25 runs, 100 positive cases), so it should be read with caution. The risk should be used as one input to routing, not the only one.
 - **Possible improvements:** per-link packet loss, queue occupancy and delay on all links, more runs, and more failing links.
